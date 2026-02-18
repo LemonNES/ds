@@ -364,17 +364,8 @@ function dispatchKey(type, keyInfo) {
   window.dispatchEvent(new KeyboardEvent(type, opts));
 }
 
-// Fake gamepad — rwebinput handles pointer/touch natively; this covers button polling
+// gpButtons — read by our input_state_cb for RETRO_DEVICE_JOYPAD
 const gpButtons = new Float64Array(16);
-Object.defineProperty(navigator, 'getGamepads', {
-  value: () => [{
-    id: 'melonDS (STANDARD GAMEPAD)', index: 0, connected: true,
-    timestamp: performance.now(), mapping: 'standard',
-    axes: [0, 0, 0, 0],
-    buttons: Array.from(gpButtons).map(v => ({ pressed: v >= 1, touched: v >= 1, value: v })),
-  }, null, null, null],
-  writable: true, configurable: true,
-});
 
 // ACTION → gamepad button index (for getGamepads polling) + key event
 const ACTION_GP_MAP = {
@@ -398,108 +389,128 @@ function releaseAction(action) {
 }
 
 // ═══════════════════════════════════════════════════
-// DS BOTTOM TOUCHSCREEN INPUT
+// DS TOUCHSCREEN — libretro RETRO_DEVICE_POINTER
 //
-// The emscripten rwebinput driver registers its own touchstart/touchmove/touchend
-// listeners directly on the canvas element via emscripten_set_touch*_callback.
-// It reads RETRO_DEVICE_POINTER x/y as coordinates relative to the full canvas
-// (both screens stacked), normalised to [-0x7fff, +0x7fff].
+// melonDS calls input_state_cb(0, RETRO_DEVICE_POINTER, 0, id) each frame.
+// RETRO_DEVICE_POINTER = 6
+// RETRO_DEVICE_ID_POINTER_X       = 0  → int16 -0x7fff..+0x7fff (full canvas width)
+// RETRO_DEVICE_ID_POINTER_Y       = 1  → int16 -0x7fff..+0x7fff (full canvas height)
+// RETRO_DEVICE_ID_POINTER_PRESSED = 2  → 1 or 0
 //
-// So for the bottom screen (y = 50%..100% of canvas height), a touch at
-// pixel (px, py) within the bottom screen maps to canvas coords:
-//   canvasY = canvasHeight/2 + py
-//
-// Our job: intercept touch/mouse events on the BOTTOM HALF of the canvas
-// and re-dispatch a new TouchEvent at those same coordinates so rwebinput
-// sees them as coming from the correct canvas position.
-//
-// We listen on the canvas itself (z-index already covers it), detect if the
-// touch is in the bottom half, and re-fire the event — rwebinput will handle
-// the rest including pointer normalisation and RETRO_DEVICE_ID_POINTER_PRESSED.
+// The frontend must supply this callback via retro_set_input_state().
+// We hook Module.onRuntimeInitialized (already defined) and also patch
+// it after callMain by wrapping the existing callback pointer so our
+// pointer state is merged in.
 // ═══════════════════════════════════════════════════
 
 let dsTouch = { active: false, x: 0, y: 0 };
 
+// Called once runtime is ready — install our input_state_cb
+function installInputStateCb() {
+  if (!window.Module || typeof Module.addFunction !== 'function') {
+    // addFunction not available — try again shortly
+    setTimeout(installInputStateCb, 200);
+    return;
+  }
+
+  // RETRO constants
+  const RETRO_DEVICE_JOYPAD   = 1;
+  const RETRO_DEVICE_POINTER  = 6;
+  const RETRO_DEVICE_ID_POINTER_X       = 0;
+  const RETRO_DEVICE_ID_POINTER_Y       = 1;
+  const RETRO_DEVICE_ID_POINTER_PRESSED = 2;
+
+  // DS touchscreen: pointer coords are relative to full framebuffer (256×384).
+  // -0x7fff = top/left, +0x7fff = bottom/right.
+  // Bottom screen occupies y = 192..383 out of 0..383.
+  // So a touch at DS bottom screen (bx, by) where bx∈[0,255] by∈[0,191]:
+  //   pointer_x = (bx / 255) * 2 * 0x7fff - 0x7fff
+  //   pointer_y = ((192 + by) / 383) * 2 * 0x7fff - 0x7fff
+  function dsPointerX() {
+    return Math.round((dsTouch.x / 255) * 2 * 0x7fff - 0x7fff);
+  }
+  function dsPointerY() {
+    return Math.round(((192 + dsTouch.y) / 383) * 2 * 0x7fff - 0x7fff);
+  }
+
+  // Create a wasm-callable input_state_cb.
+  // Signature: int16_t (unsigned port, unsigned device, unsigned index, unsigned id)
+  // Emscripten type string: 'iiiii' (return i32, four i32 args)
+  const inputStateCb = Module.addFunction((port, device, index, id) => {
+    if (port === 0) {
+      // Joypad buttons
+      if (device === RETRO_DEVICE_JOYPAD) {
+        return gpButtons[id] ? 1 : 0;
+      }
+      // Pointer / touchscreen
+      if (device === RETRO_DEVICE_POINTER) {
+        if (id === RETRO_DEVICE_ID_POINTER_PRESSED) return dsTouch.active ? 1 : 0;
+        if (id === RETRO_DEVICE_ID_POINTER_X)       return dsPointerX();
+        if (id === RETRO_DEVICE_ID_POINTER_Y)       return dsPointerY();
+      }
+    }
+    return 0;
+  }, 'iiiii');
+
+  // Register with the core
+  if (typeof Module._retro_set_input_state === 'function') {
+    Module._retro_set_input_state(inputStateCb);
+    console.log('[DS] input_state_cb installed');
+  } else {
+    console.warn('[DS] _retro_set_input_state not found — touch may not work');
+  }
+}
+
+// Canvas touch tracking — translate to DS bottom-screen coordinates
 function isBottomScreen(clientY) {
   const rect = canvas.getBoundingClientRect();
   return clientY >= rect.top + rect.height * 0.5;
 }
 
-// Track whether a finger that started on the bottom screen is still down
 const bottomTouchIds = new Set();
+
+function updateDSTouch(clientX, clientY) {
+  const rect = canvas.getBoundingClientRect();
+  const rx = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
+  const ry = Math.max(0, Math.min(1, (clientY - (rect.top + rect.height * 0.5)) / (rect.height * 0.5)));
+  dsTouch = { active: true, x: Math.round(rx * 255), y: Math.round(ry * 191) };
+}
 
 canvas.addEventListener('touchstart', e => {
   for (const t of e.changedTouches) {
     if (isBottomScreen(t.clientY)) {
       bottomTouchIds.add(t.identifier);
-      const rect = canvas.getBoundingClientRect();
-      // DS coords within bottom screen
-      const rx = Math.max(0, Math.min(1, (t.clientX - rect.left) / rect.width));
-      const ry = Math.max(0, Math.min(1, (t.clientY - (rect.top + rect.height * 0.5)) / (rect.height * 0.5)));
-      dsTouch = { active: true, x: Math.round(rx * 255), y: Math.round(ry * 191) };
+      updateDSTouch(t.clientX, t.clientY);
     }
   }
-  // Don't preventDefault — let rwebinput see the event on the canvas naturally
 }, { passive: true });
 
 canvas.addEventListener('touchmove', e => {
   for (const t of e.changedTouches) {
-    if (bottomTouchIds.has(t.identifier)) {
-      const rect = canvas.getBoundingClientRect();
-      const rx = Math.max(0, Math.min(1, (t.clientX - rect.left) / rect.width));
-      const ry = Math.max(0, Math.min(1, (t.clientY - (rect.top + rect.height * 0.5)) / (rect.height * 0.5)));
-      dsTouch = { active: true, x: Math.round(rx * 255), y: Math.round(ry * 191) };
-    }
+    if (bottomTouchIds.has(t.identifier)) updateDSTouch(t.clientX, t.clientY);
   }
 }, { passive: true });
 
 canvas.addEventListener('touchend', e => {
-  for (const t of e.changedTouches) {
-    if (bottomTouchIds.has(t.identifier)) {
-      bottomTouchIds.delete(t.identifier);
-    }
-  }
-  if (bottomTouchIds.size === 0) {
-    dsTouch = { active: false, x: 0, y: 0 };
-  }
+  for (const t of e.changedTouches) bottomTouchIds.delete(t.identifier);
+  if (bottomTouchIds.size === 0) dsTouch = { active: false, x: 0, y: 0 };
 }, { passive: true });
 
 canvas.addEventListener('touchcancel', e => {
   for (const t of e.changedTouches) bottomTouchIds.delete(t.identifier);
-  if (bottomTouchIds.size === 0) {
-    dsTouch = { active: false, x: 0, y: 0 };
-  }
+  if (bottomTouchIds.size === 0) dsTouch = { active: false, x: 0, y: 0 };
 }, { passive: true });
 
-// Mouse fallback for desktop: translate mouse on bottom half of canvas
-// into a synthetic pointer event rwebinput can read via the mouse API.
-// We also update dsTouch so the debug overlay reflects state.
+// Mouse fallback
 let mouseDownOnBottom = false;
 canvas.addEventListener('mousedown', e => {
-  if (isBottomScreen(e.clientY)) {
-    mouseDownOnBottom = true;
-    const rect = canvas.getBoundingClientRect();
-    const rx = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
-    const ry = Math.max(0, Math.min(1, (e.clientY - (rect.top + rect.height * 0.5)) / (rect.height * 0.5)));
-    dsTouch = { active: true, x: Math.round(rx * 255), y: Math.round(ry * 191) };
-  }
+  if (isBottomScreen(e.clientY)) { mouseDownOnBottom = true; updateDSTouch(e.clientX, e.clientY); }
 });
 canvas.addEventListener('mousemove', e => {
-  if (mouseDownOnBottom && (e.buttons & 1)) {
-    const rect = canvas.getBoundingClientRect();
-    const rx = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
-    const ry = Math.max(0, Math.min(1, (e.clientY - (rect.top + rect.height * 0.5)) / (rect.height * 0.5)));
-    dsTouch = { active: true, x: Math.round(rx * 255), y: Math.round(ry * 191) };
-  }
+  if (mouseDownOnBottom && (e.buttons & 1)) updateDSTouch(e.clientX, e.clientY);
 });
-canvas.addEventListener('mouseup', () => {
-  mouseDownOnBottom = false;
-  dsTouch = { active: false, x: 0, y: 0 };
-});
-canvas.addEventListener('mouseleave', () => {
-  mouseDownOnBottom = false;
-  dsTouch = { active: false, x: 0, y: 0 };
-});
+canvas.addEventListener('mouseup',    () => { mouseDownOnBottom = false; dsTouch = { active: false, x: 0, y: 0 }; });
+canvas.addEventListener('mouseleave', () => { mouseDownOnBottom = false; dsTouch = { active: false, x: 0, y: 0 }; });
 
 // ═══════════════════════════════════════════════════
 // BUTTON TOUCH HANDLING (multi-touch, gamepad buttons)
@@ -623,6 +634,8 @@ function loadRomData(data) {
     } else if (typeof Module._main === 'function') {
       Module._main();
     }
+    // Install our input_state_cb now that the core has started
+    setTimeout(installInputStateCb, 100);
     canvas.focus();
     document.getElementById('idleHint').classList.add('hidden');
   } catch(e) {
