@@ -121,7 +121,7 @@
     max-height: 48vh; max-height: 48dvh;
     padding: 8px max(12px, env(safe-area-inset-right)) max(14px, env(safe-area-inset-bottom)) max(12px, env(safe-area-inset-left));
     display: grid;
-    grid-template-columns: 1fr auto 1fr;
+    grid-template-columns: 1fr 1fr;
     gap: calc(var(--s) * 1.5);
     position: relative;
     z-index: 30;
@@ -170,12 +170,11 @@
   .dpad-btn.left  .chevron { transform: rotate(135deg)  translateY(-1px); }
   .dpad-btn.right .chevron { transform: rotate(-45deg)  translateY(-1px); }
 
-  /* CENTER GROUP - pill buttons */
-  .group-center { display: flex; flex-direction: column; align-items: center; justify-content: flex-end; gap: calc(var(--s) * 1); padding-bottom: calc(var(--s) * 2); }
+  /* CENTER GROUP - removed, start/select now live in shoulder rows */
   .btn-select, .btn-start {
     width: calc(var(--s) * 7); height: calc(var(--s) * 2.5);
     border-radius: 20px;
-    font-size: calc(var(--s) * 0.9); font-weight: 700; letter-spacing: 0.5px;
+    font-size: calc(var(--s) * 0.85); font-weight: 700; letter-spacing: 0.5px;
     color: var(--text-muted);
   }
   .btn-select.pressed, .btn-start.pressed { color: var(--acc); }
@@ -225,7 +224,6 @@
     .controls-area { height: 100vh; height: 100dvh; width: 100vw; max-height: 100dvh; position: absolute; inset: 0; pointer-events: none; grid-template-columns: 1fr 1fr; padding: calc(var(--s) * 2); gap: 0; order: 2; }
     .controls-area > * { pointer-events: auto; }
     .group-left { position: absolute; bottom: calc(var(--s) * 6); left: calc(var(--s) * 4); align-items: flex-start; }
-    .group-center { position: absolute; bottom: calc(var(--s) * 6); left: 50%; transform: translateX(-50%); }
     .group-right { position: absolute; bottom: calc(var(--s) * 6); right: calc(var(--s) * 4); align-items: flex-end; }
   }
 </style>
@@ -255,7 +253,10 @@
 
 <div class="controls-area" id="controls">
   <div class="group-left">
-    <div class="touch-btn btn-shoulder" data-action="L" style="align-self:flex-start;">L</div>
+    <div class="shoulder-row">
+      <div class="touch-btn btn-shoulder" data-action="L">L</div>
+      <div class="touch-btn btn-select" data-action="START">START</div>
+    </div>
     <div class="dpad">
       <div class="dpad-center"></div>
       <div class="touch-btn dpad-btn up"    data-action="DUP"><span class="chevron"></span></div>
@@ -264,12 +265,9 @@
       <div class="touch-btn dpad-btn right" data-action="DRIGHT"><span class="chevron"></span></div>
     </div>
   </div>
-  <div class="group-center">
-    <div class="touch-btn btn-select" data-action="SELECT">SELECT</div>
-    <div class="touch-btn btn-start"  data-action="START">START</div>
-  </div>
   <div class="group-right">
     <div class="shoulder-row">
+      <div class="touch-btn btn-select" data-action="SELECT">SELECT</div>
       <div class="touch-btn btn-shoulder" data-action="R">R</div>
     </div>
     <div class="face-buttons">
