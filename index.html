@@ -326,91 +326,68 @@ document.getElementById('resSelect').addEventListener('change', function() {
 });
 
 // ═══════════════════════════════════════════════════
-// VIRTUAL GAMEPAD
-// DS RetroPad mapping:
-//   0=B  1=Y  2=Select  3=Start
-//   4=DUp  5=DDown  6=DLeft  7=DRight
-//   8=A  9=X  10=L  11=R
+// INPUT: dispatch real KeyboardEvents to canvas
+// Emscripten SDL2 cores ignore navigator.getGamepads —
+// they read keyboard events. We map DS buttons → keys
+// that the default RetroArch / DeSmuME SDL keymap expects.
+//
+// Default DeSmuME key map (can be overridden in core options):
+//   A=x  B=z  X=s  Y=a  Start=Return  Select=Shift(right)
+//   L=q  R=w  Up=Up  Down=Down  Left=Left  Right=Right
 // ═══════════════════════════════════════════════════
-const NUM_BUTTONS = 16;
-const NUM_AXES    = 4;
-const gpButtons   = new Float64Array(NUM_BUTTONS);
-const gpAxes      = new Float64Array(NUM_AXES);
 
-// DS touchscreen state exposed via axes[2] (x) and axes[3] (y), normalised -1..1
-// and a dedicated "touch pressed" button at index 12.
-// Different cores may read touch differently — we handle all common approaches.
-let dsTouch = { active: false, x: 0, y: 0 }; // x/y in DS coords 0–255, 0–191
+// ACTION → { key, code, keyCode }
+const ACTION_KEY_MAP = {
+  A:      { key: 'x',          code: 'KeyX',       keyCode: 88 },
+  B:      { key: 'z',          code: 'KeyZ',       keyCode: 90 },
+  X:      { key: 's',          code: 'KeyS',       keyCode: 83 },
+  Y:      { key: 'a',          code: 'KeyA',       keyCode: 65 },
+  START:  { key: 'Enter',      code: 'Enter',      keyCode: 13 },
+  SELECT: { key: 'Shift',      code: 'ShiftRight', keyCode: 16 },
+  L:      { key: 'q',          code: 'KeyQ',       keyCode: 81 },
+  R:      { key: 'w',          code: 'KeyW',       keyCode: 87 },
+  DUP:    { key: 'ArrowUp',    code: 'ArrowUp',    keyCode: 38 },
+  DDOWN:  { key: 'ArrowDown',  code: 'ArrowDown',  keyCode: 40 },
+  DLEFT:  { key: 'ArrowLeft',  code: 'ArrowLeft',  keyCode: 37 },
+  DRIGHT: { key: 'ArrowRight', code: 'ArrowRight', keyCode: 39 },
+};
 
-const ACTION_MAP = {
-  A:      { type: 'button', index: 8  },
-  B:      { type: 'button', index: 0  },
-  X:      { type: 'button', index: 9  },
-  Y:      { type: 'button', index: 1  },
-  START:  { type: 'button', index: 3  },
-  SELECT: { type: 'button', index: 2  },
-  L:      { type: 'button', index: 10 },
-  R:      { type: 'button', index: 11 },
-  DUP:    { type: 'button', index: 4  },
-  DDOWN:  { type: 'button', index: 5  },
-  DLEFT:  { type: 'button', index: 6  },
-  DRIGHT: { type: 'button', index: 7  },
+let dsTouch = { active: false, x: 0, y: 0 };
+
+function dispatchKey(type, keyInfo) {
+  // Fire on both canvas (SDL picks it up) and window (fallback)
+  const opts = {
+    bubbles: true, cancelable: true,
+    key: keyInfo.key, code: keyInfo.code, keyCode: keyInfo.keyCode,
+    which: keyInfo.keyCode, shiftKey: keyInfo.code === 'ShiftRight',
+  };
+  canvas.dispatchEvent(new KeyboardEvent(type, opts));
+  // Also fire on window so the core catches it regardless of focus
+  window.dispatchEvent(new KeyboardEvent(type, opts));
+}
+
+// ACTION → gamepad button index (for getGamepads polling) + key event
+const ACTION_GP_MAP = {
+  A:8, B:0, X:9, Y:1, START:3, SELECT:2, L:10, R:11,
+  DUP:4, DDOWN:5, DLEFT:6, DRIGHT:7,
 };
 
 function pressAction(action) {
-  const m = ACTION_MAP[action];
-  if (!m) return;
-  if (m.type === 'button') gpButtons[m.index] = 1;
+  const k = ACTION_KEY_MAP[action];
+  if (k) dispatchKey('keydown', k);
+  if (ACTION_GP_MAP[action] !== undefined) gpButtons[ACTION_GP_MAP[action]] = 1;
   document.querySelectorAll(`[data-action="${action}"]`).forEach(el => el.classList.add('pressed'));
   if (navigator.vibrate) navigator.vibrate(8);
   updateDebug();
 }
 
 function releaseAction(action) {
-  const m = ACTION_MAP[action];
-  if (!m) return;
-  if (m.type === 'button') gpButtons[m.index] = 0;
+  const k = ACTION_KEY_MAP[action];
+  if (k) dispatchKey('keyup', k);
+  if (ACTION_GP_MAP[action] !== undefined) gpButtons[ACTION_GP_MAP[action]] = 0;
   document.querySelectorAll(`[data-action="${action}"]`).forEach(el => el.classList.remove('pressed'));
   updateDebug();
 }
-
-function buildFakeGamepad() {
-  // Encode touch into axes[2]/axes[3] (normalised -1..1 from DS coords)
-  // and axes[0]/axes[1] as 0 (no analog stick on DS)
-  const axes = [...gpAxes];
-  axes[2] = dsTouch.active ? (dsTouch.x / 127.5) - 1 : 0; // 0–255 → -1..1
-  axes[3] = dsTouch.active ? (dsTouch.y / 95.5)  - 1 : 0; // 0–191 → -1..1
-
-  const buttons = Array.from(gpButtons).map(v => ({
-    pressed: v >= 1, touched: v >= 1, value: v,
-  }));
-  // Some cores use button 12 as "touchscreen pressed"
-  buttons[12] = { pressed: dsTouch.active, touched: dsTouch.active, value: dsTouch.active ? 1 : 0 };
-
-  return {
-    id: 'Nintendo DS Controller (STANDARD GAMEPAD)',
-    index: 0, connected: true,
-    timestamp: performance.now(),
-    mapping: 'standard',
-    axes, buttons,
-  };
-}
-
-Object.defineProperty(navigator, 'getGamepads', {
-  value: function() { return [buildFakeGamepad(), null, null, null]; },
-  writable: true, configurable: true,
-});
-
-function fireGamepadConnected() {
-  try {
-    const ev = new Event('gamepadconnected');
-    ev.gamepad = buildFakeGamepad();
-    window.dispatchEvent(ev);
-    console.log('[DS] gamepadconnected fired');
-  } catch(_) {}
-}
-setTimeout(fireGamepadConnected, 100);
-setTimeout(fireGamepadConnected, 1000);
 
 // ═══════════════════════════════════════════════════
 // DS BOTTOM TOUCHSCREEN INPUT
@@ -457,23 +434,44 @@ function releaseDSTouch() {
   updateDebug();
 }
 
-// Try all known emulator touch APIs
+// melonDS libretro reads touch via the libretro input API (pointer device).
+// Our getGamepads override encodes touch in axes[2/3] + buttons[12],
+// which covers the RetroArch/libretro pointer path.
+// Also try any direct wasm exports as a fallback.
 function notifyEmuTouch(x, y, pressed) {
   try {
-    // melonDS / DeSmuME libretro: exposed via Module
-    if (window.Module) {
-      if (typeof Module._NDS_setTouchPos === 'function') {
-        if (pressed) Module._NDS_setTouchPos(x, y);
-        else         Module._NDS_releaseTouch();
-      }
-      if (typeof Module._retro_set_input_poll === 'function') { /* handled via getGamepads */ }
-      // DeSmuME standalone wasm
-      if (typeof Module._set_stylus_pos === 'function') {
-        Module._set_stylus_pos(pressed ? x : -1, pressed ? y : -1);
-      }
+    if (!window.Module) return;
+    if (typeof Module._NDS_setTouchPos === 'function') {
+      if (pressed) Module._NDS_setTouchPos(x, y);
+      else         Module._NDS_releaseTouch();
     }
+    if (typeof Module._retro_set_stylus_pos === 'function')
+      Module._retro_set_stylus_pos(pressed ? x : -1, pressed ? y : -1);
   } catch (e) { /* best-effort */ }
 }
+
+// Rebuild the fake gamepad so melonDS can poll pointer state each frame.
+// melonDS libretro maps RETRO_DEVICE_POINTER: pointer_x/y are axes[2/3] (−0x7fff..0x7fff range).
+const gpButtons = new Float64Array(16);
+const gpAxes    = new Float64Array(4);
+
+function buildFakeGamepad() {
+  const axes = [...gpAxes];
+  // melonDS pointer coords: −0x7fff..0x7fff mapped from screen-relative position
+  axes[2] = dsTouch.active ? ((dsTouch.x / 255) * 2 - 1) * 0x7fff : 0;
+  axes[3] = dsTouch.active ? ((dsTouch.y / 191) * 2 - 1) * 0x7fff : 0;
+  const buttons = Array.from(gpButtons).map(v => ({ pressed: v >= 1, touched: v >= 1, value: v }));
+  buttons[12] = { pressed: dsTouch.active, touched: dsTouch.active, value: dsTouch.active ? 1 : 0 };
+  return {
+    id: 'melonDS (STANDARD GAMEPAD)', index: 0, connected: true,
+    timestamp: performance.now(), mapping: 'standard',
+    axes, buttons,
+  };
+}
+Object.defineProperty(navigator, 'getGamepads', {
+  value: () => [buildFakeGamepad(), null, null, null],
+  writable: true, configurable: true,
+});
 
 // Touch events on the bottom screen overlay
 touchScreenEl.addEventListener('touchstart', e => {
@@ -559,56 +557,60 @@ document.querySelectorAll('[data-action]').forEach(btn => {
   btn.addEventListener('mouseleave', () => releaseAction(action));
 });
 
-// ═══════════════════════════════════════════════════
-// KEYBOARD SUPPORT
-// ═══════════════════════════════════════════════════
-const KB_MAP = {
-  'KeyZ':       'B',
-  'KeyX':       'A',
-  'KeyA':       'Y',
-  'KeyS':       'X',
-  'Enter':      'START',
-  'ShiftRight': 'SELECT',
-  'KeyQ':       'L',
-  'KeyW':       'R',
-  'ArrowUp':    'DUP',
-  'ArrowDown':  'DDOWN',
-  'ArrowLeft':  'DLEFT',
-  'ArrowRight': 'DRIGHT',
+// Physical keyboard: map keys directly to DS actions (same mappings as ACTION_KEY_MAP)
+const KB_CODE_MAP = {
+  'KeyZ': 'B', 'KeyX': 'A', 'KeyA': 'Y', 'KeyS': 'X',
+  'Enter': 'START', 'ShiftRight': 'SELECT',
+  'KeyQ': 'L', 'KeyW': 'R',
+  'ArrowUp': 'DUP', 'ArrowDown': 'DDOWN', 'ArrowLeft': 'DLEFT', 'ArrowRight': 'DRIGHT',
 };
+// We listen for keydown/up on window BUT only for events NOT dispatched by us.
+// Our synthetic events have isTrusted=false, so we can skip them.
 window.addEventListener('keydown', e => {
+  if (!e.isTrusted) return; // ignore our own synthetic events
   if (['ArrowUp','ArrowDown','ArrowLeft','ArrowRight','Space'].includes(e.code)) e.preventDefault();
-  const action = KB_MAP[e.code];
-  if (action && !e.repeat) pressAction(action);
+  const action = KB_CODE_MAP[e.code];
+  if (action && !e.repeat) {
+    document.querySelectorAll(`[data-action="${action}"]`).forEach(el => el.classList.add('pressed'));
+    // Forward the real event to canvas so SDL receives it
+    canvas.dispatchEvent(new KeyboardEvent('keydown', {
+      bubbles: true, cancelable: true,
+      key: e.key, code: e.code, keyCode: e.keyCode, which: e.keyCode,
+    }));
+  }
 });
 window.addEventListener('keyup', e => {
-  const action = KB_MAP[e.code];
-  if (action) releaseAction(action);
+  if (!e.isTrusted) return;
+  const action = KB_CODE_MAP[e.code];
+  if (action) {
+    document.querySelectorAll(`[data-action="${action}"]`).forEach(el => el.classList.remove('pressed'));
+    canvas.dispatchEvent(new KeyboardEvent('keyup', {
+      bubbles: true, cancelable: true,
+      key: e.key, code: e.code, keyCode: e.keyCode, which: e.keyCode,
+    }));
+  }
 });
 
 // ═══════════════════════════════════════════════════
 // EMULATOR / ROM LOADING
 //
-// FIX: Don't set noInitialRun here — it breaks cores that
-// self-initialise. Instead we handle ROM loading via FS.
-// We defer callMain until the runtime is confirmed ready.
+// The core script (desmume_libretro.js) is lazy-loaded only
+// after a ROM is selected, so it doesn't fire main() on page load.
+// noInitialRun:true stops the core auto-running before we provide a ROM.
 // ═══════════════════════════════════════════════════
 let runtimeReady = false;
 let pendingRomData = null;
+let coreLoaded = false;
 
+// Module must be defined before the core script loads
 window.Module = {
-  // NOTE: Do NOT set noInitialRun:true — some cores need to run their init path.
-  // If your build requires it, set it per your Makefile/emcc flags instead.
+  noInitialRun: true,   // don't call main() automatically
   canvas: canvas,
   print:    console.log,
   printErr: console.warn,
-
   onRuntimeInitialized: function() {
     runtimeReady = true;
     console.log('[DS] Runtime ready');
-    setTimeout(fireGamepadConnected, 50);
-    setTimeout(fireGamepadConnected, 500);
-    // If ROM was picked before runtime was ready, load it now
     if (pendingRomData) {
       const data = pendingRomData;
       pendingRomData = null;
@@ -621,16 +623,13 @@ function loadRomData(data) {
   try {
     Module.FS.writeFile('/rom.nds', data);
     if (window.SDL2?.audioContext) SDL2.audioContext.resume().catch(() => {});
-    // Re-apply canvas resolution so the emulator draws at the right size
     setCanvasResolution(resMultiplier);
-    // callMain is the standard emscripten entry; some cores expose _main directly
     if (typeof Module.callMain === 'function') {
       Module.callMain(['/rom.nds']);
     } else if (typeof Module._main === 'function') {
       Module._main();
     }
-    setTimeout(fireGamepadConnected, 300);
-    setTimeout(fireGamepadConnected, 1500);
+    canvas.focus();
     document.getElementById('idleHint').classList.add('hidden');
   } catch(e) {
     console.error('[DS] ROM load error:', e);
@@ -644,17 +643,22 @@ document.getElementById('romInput').addEventListener('change', function() {
   const reader = new FileReader();
   reader.onload = ev => {
     const data = new Uint8Array(ev.target.result);
-    if (!runtimeReady) {
-      // Queue it — onRuntimeInitialized will pick it up
+    if (!coreLoaded) {
+      // Lazy-load the core script now — it reads window.Module on load
+      coreLoaded = true;
       pendingRomData = data;
-      console.log('[DS] ROM queued; waiting for runtime');
+      const s = document.createElement('script');
+      s.src = 'melonds_libretro.js';
+      s.onerror = () => alert('Failed to load emulator core (desmume_libretro.js)');
+      document.body.appendChild(s);
+    } else if (!runtimeReady) {
+      pendingRomData = data;
     } else {
       loadRomData(data);
     }
   };
   reader.readAsArrayBuffer(file);
-  // Reset input so same file can be reloaded
-  this.value = '';
+  this.value = ''; // allow reloading same file
 });
 
 // ═══════════════════════════════════════════════════
@@ -695,7 +699,6 @@ document.getElementById('btnSaveState').addEventListener('click', () => {
 setInterval(() => { if (debugVisible) updateDebug(); }, 100);
 </script>
 
-<!-- Load the DS libretro WASM melonDS core -->
-<script src="melonds_libretro.js"></script>
 </body>
 </html>
+
